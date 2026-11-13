@@ -38,7 +38,7 @@ are sent the next time the game opens.
 
 ### Setting it up (about 5 minutes, once)
 
-1. Go to [supabase.com](https://supabase.com), sign in with GitHub, and create a new
+1. Go to [supabase.com](https://supabase.com), sign up (email or GitHub), and create a new
    project on the free plan (any name; pick the region closest to your players; save the
    database password somewhere, though the game doesn't need it).
 2. When the project is ready, open **SQL Editor**, start a new query, paste everything in

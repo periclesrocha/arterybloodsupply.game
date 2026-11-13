@@ -9,6 +9,6 @@
  * Never put a secret key (sb_secret_...) or the service_role key here.
  */
 window.LEADERBOARD = {
-  supabaseUrl: '',  // e.g. 'https://abcdefghijklmnop.supabase.co'
-  supabaseKey: ''   // the project's publishable key, e.g. 'sb_publishable_...'
+  supabaseUrl: 'https://vpsyvzxsqmyavwpagnxc.supabase.co',
+  supabaseKey: 'sb_publishable_jRcRRGaaj-_5b390WQ-PLw_zEglHBOj'
 };
