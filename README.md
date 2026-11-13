@@ -4,7 +4,7 @@ A drag-and-drop study game. The arterial tree starts empty; drag each of the 63 
 from the word bank into its place, from the arch of the aorta out to the last branch of
 the maxillary artery. When a branch is right, blood flows into it.
 
-**Play it:** https://periclesrocha.github.io/arterybloodsupply.game/
+**Play it:** https://periclesrocha.com/arterybloodsupply.game/
 
 ## How it plays
 
@@ -36,9 +36,9 @@ branch and the tree lays itself out again. No build step.
 
 ## Publishing (one-time setup)
 
-Settings → Pages → Build and deployment → Source: **GitHub Actions**. The workflow in
-`.github/workflows/pages.yml` publishes the site on every push to `main` (watch it in the
-Actions tab, or run it by hand there with "Run workflow").
+Settings → Pages → Build and deployment → Source: **Deploy from a branch**, Branch:
+**main**, folder **/ (root)**. GitHub republishes the site after every push to `main`;
+watch the "pages build and deployment" run in the Actions tab.
 
 To run it locally: `python3 -m http.server` in this folder, then open
 http://localhost:8000.
