@@ -36,9 +36,11 @@
     viewport: $('viewport'), sizer: $('sizer'), stage: $('stage'), svg: $('vessels'),
     cards: $('cards'), bank: $('bank'), bankCount: $('bankCount'), bankEmpty: $('bankEmpty'),
     filter: $('filter'), toast: $('toast'), popover: $('popover'),
-    modeLine: $('modeLine'), time: $('statTime'), placed: $('statPlaced'),
+    modeLine: $('modeLine'), time: $('statTime'), score: $('statScore'),
     mistakes: $('statMistakes'), hints: $('statHints'), progress: $('progressFill'),
     btnHint: $('btnHint'), btnCheck: $('btnCheck'), btnReveal: $('btnReveal'), btnNew: $('btnNew'),
+    btnBoard: $('btnBoard'), nickInput: $('nickInput'), nickHint: $('nickHint'),
+    boardDialog: $('boardDialog'), boardBody: $('boardBody'), boardNote: $('boardNote'), boardClose: $('boardClose'),
     btnSound: $('btnSound'), zoomIn: $('zoomIn'), zoomOut: $('zoomOut'), zoomFit: $('zoomFit'),
     zoomLevel: $('zoomLevel'),
     intro: $('introDialog'), introForm: $('introForm'), strictInput: $('strictInput'),
@@ -57,6 +59,81 @@
     get(k, d) { try { const v = localStorage.getItem('arteries.' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
     set(k, v) { try { localStorage.setItem('arteries.' + k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } }
   };
+
+  // ------------------------------------------------------------------
+  // Scoring and nicknames
+  // ------------------------------------------------------------------
+  // Keep these in step with the score_ms formula in supabase/leaderboard.sql
+  const MISTAKE_PENALTY_MS = 10000;
+  const HINT_PENALTY_MS = 20000;
+  const MIN_TIME_MS = 30000; // the database rejects anything faster
+  const scoreOf = (timeMs, mistakes, hints) => timeMs + mistakes * MISTAKE_PENALTY_MS + hints * HINT_PENALTY_MS;
+  const cleanNick = v => String(v || '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 24);
+  const nickKey = v => cleanNick(v).toLowerCase();
+  const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+  const boardLabel = (mode, slide) => (mode === 'test' ? 'Test' : 'Practice') + (slide ? ' (slide order)' : '');
+
+  // ------------------------------------------------------------------
+  // Global leaderboard (Supabase REST). Off until config.js has both values.
+  // ------------------------------------------------------------------
+  const LBCFG = window.LEADERBOARD || {};
+  const lb = {
+    on: !!(LBCFG.supabaseUrl && LBCFG.supabaseKey),
+    url(path) { return String(LBCFG.supabaseUrl).replace(/\/+$/, '') + '/rest/v1/' + path; },
+    headers(extra) {
+      const h = Object.assign({ apikey: LBCFG.supabaseKey }, extra || {});
+      // Legacy anon keys are JWTs and also go in Authorization; publishable keys must not
+      if (/^eyJ/.test(LBCFG.supabaseKey)) h.Authorization = 'Bearer ' + LBCFG.supabaseKey;
+      return h;
+    },
+    async req(path, opts = {}) {
+      const ctl = new AbortController();
+      const timer = setTimeout(() => ctl.abort(), 9000);
+      try {
+        const r = await fetch(this.url(path), Object.assign({}, opts, { headers: this.headers(opts.headers), signal: ctl.signal }));
+        const text = await r.text();
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch (e) { body = null; }
+        if (!r.ok) {
+          const err = new Error((body && (body.message || body.msg)) || ('HTTP ' + r.status));
+          err.status = r.status; err.code = body && body.code;
+          throw err;
+        }
+        return body;
+      } finally { clearTimeout(timer); }
+    },
+    submit(run) {
+      return this.req('scores', { method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' }, body: JSON.stringify(run) });
+    },
+    board(mode, slide) {
+      return this.req(`leaderboard?select=nickname,nickname_key,score_ms,time_ms,mistakes,hints,runs,created_at&mode=eq.${mode}&slide_order=eq.${slide ? 'true' : 'false'}&order=score_ms.asc,created_at.asc&limit=500`);
+    },
+    runs(key) {
+      const quoted = '"' + key.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+      return this.req(`scores?select=nickname,mode,slide_order,score_ms,time_ms,mistakes,hints,created_at&nickname_key=eq.${encodeURIComponent(quoted)}&order=created_at.desc&limit=200`);
+    }
+  };
+  // Network trouble, server errors and the 15 s cooldown are worth retrying later
+  const retryable = e => !e.status || e.status >= 500 || e.code === '42501';
+
+  function queueRun(run) {
+    const list = store.get('pending', []);
+    list.push(run);
+    store.set('pending', list.slice(-50));
+  }
+  async function flushPending() {
+    if (!lb.on) return;
+    const list = store.get('pending', []);
+    if (!list.length) return;
+    const keep = [], seen = new Set();
+    for (const run of list) {
+      const k = nickKey(run.nickname);
+      if (seen.has(k)) { keep.push(run); continue; } // one per nickname per visit (cooldown)
+      seen.add(k);
+      try { await lb.submit(run); } catch (e) { if (retryable(e)) keep.push(run); }
+    }
+    store.set('pending', keep);
+  }
 
   // ------------------------------------------------------------------
   // Sound: a soft heartbeat for a correct branch, a dull buzz for a miss
@@ -346,6 +423,7 @@
     const cards = nodes.map((n, i) => ({ id: 'c' + i, label: n.label, slot: null, rand: Math.random() }));
     return {
       mode, strict,
+      nick: cleanNick(store.get('nickname', '')),
       cards, cardById: new Map(cards.map(c => [c.id, c])),
       slotCard: new Map(),   // slotId -> cardId
       locked: new Set(),     // slots confirmed correct
@@ -502,13 +580,12 @@
   }
 
   function renderStats() {
-    const placed = S.mode === 'practice' ? S.locked.size : S.slotCard.size;
     el.time.textContent = fmtTime(elapsed());
-    el.placed.textContent = `${placed} of ${TOTAL}`;
+    el.score.textContent = fmtTime(scoreOf(elapsed(), S.mistakes, S.hints));
     el.mistakes.textContent = S.mode === 'test' && S.checks === 0 ? '–' : S.mistakes;
     el.hints.textContent = S.hints;
     el.progress.style.width = (S.locked.size / TOTAL * 100) + '%';
-    el.modeLine.textContent = (S.mode === 'practice' ? 'Practice' : 'Test') + (S.strict ? ', branches in slide order' : ', any order within a branch');
+    el.modeLine.textContent = (S.nick ? S.nick + ' playing ' : '') + (S.mode === 'practice' ? 'Practice' : 'Test') + (S.strict ? ', branches in slide order' : ', any order within a branch');
     el.btnCheck.hidden = S.mode !== 'test';
     el.btnCheck.disabled = !S.running || S.slotCard.size === S.locked.size;
     el.btnHint.disabled = !S.running;
@@ -518,7 +595,11 @@
 
   function render() { renderSlots(); renderBank(); renderStats(); }
 
-  setInterval(() => { if (S && S.running) el.time.textContent = fmtTime(elapsed()); }, 250);
+  setInterval(() => {
+    if (!S || !S.running) return;
+    el.time.textContent = fmtTime(elapsed());
+    el.score.textContent = fmtTime(scoreOf(elapsed(), S.mistakes, S.hints));
+  }, 250);
 
   // ------------------------------------------------------------------
   // Feedback helpers
@@ -879,7 +960,7 @@
   function askReveal() {
     confirmBox({
       title: 'Show the answers?',
-      text: 'This ends the round. Every box you haven’t got right yet will be filled in for you.',
+      text: 'This ends the round without a score. Every box you haven’t got right yet will be filled in for you.',
       yes: 'Show answers', no: 'Keep playing',
       onYes: reveal
     });
@@ -926,44 +1007,76 @@
     S.finished = true;
     S.selected = null;
     render();
-    const time = S.elapsed;
-    const key = `best.${S.mode}.${S.strict ? 'ordered' : 'any'}`;
-    const prev = store.get(key, null);
-    let best = '';
-    if (S.mode === 'practice') {
-      const isBestTime = !prev || time < prev.time;
-      const isBestMist = !prev || S.mistakes < prev.mistakes;
-      store.set(key, { time: isBestTime ? time : prev.time, mistakes: isBestMist ? S.mistakes : prev.mistakes });
-      if (!prev) best = 'First full tree. Your time and mistakes are saved as the ones to beat.';
-      else if (isBestTime && isBestMist) best = 'Your fastest time and fewest mistakes yet.';
-      else if (isBestTime) best = `Your fastest time yet. Fewest mistakes so far: ${prev.mistakes}.`;
-      else if (isBestMist) best = `Your fewest mistakes yet. Best time so far: ${fmtTime(prev.time)}.`;
-      else best = `Your best: ${fmtTime(prev.time)}, and ${prev.mistakes} ${prev.mistakes === 1 ? 'mistake' : 'mistakes'}.`;
-    } else {
-      const first = S.firstScore;
-      const isBest = !prev || first > prev.score || (first === prev.score && time < prev.time);
-      if (isBest) store.set(key, { score: first, time });
-      best = !prev ? `First check: ${first} of ${TOTAL}. That’s the score to beat.`
-        : isBest ? `New best first check: ${first} of ${TOTAL}.`
-        : `Best first check so far: ${prev.score} of ${TOTAL}.`;
-    }
+    const time = Math.round(S.elapsed);
+    const score = scoreOf(time, S.mistakes, S.hints);
+    const run = { nickname: S.nick, mode: S.mode, slide_order: S.strict, time_ms: time, mistakes: S.mistakes, hints: S.hints };
 
-    const show = () => showResult({
-      title: 'The whole tree is perfused.',
-      text: S.mode === 'practice'
-        ? `All ${TOTAL} branches are in place, from the arch of the aorta to the nasopalatine.`
-        : (S.firstScore === TOTAL ? `Every one of the ${TOTAL} branches was right on the first check.` : `All ${TOTAL} branches are right. You got ${S.firstScore} on the first check.`),
-      stats: S.mode === 'practice'
-        ? [['Time', fmtTime(time)], ['Mistakes', S.mistakes], ['Hints', S.hints], ['Longest streak', S.bestStreak]]
-        : [['Time', fmtTime(time)], ['First check', `${Math.round(S.firstScore / TOTAL * 100)}%`], ['Checks', S.checks], ['Hints', S.hints]],
-      best,
-      actions: [
-        { label: 'Explore the tree', cls: 'btn', fn: () => toast('Select any box to see what it supplies.', 3000) },
-        { label: 'Play again', cls: 'btn btn-primary', fn: () => openIntro() }
-      ]
-    });
+    // Every finished run is kept on this device too (and powers the offline leaderboard)
+    const key = nickKey(S.nick);
+    const local = store.get('runs', []);
+    const prevBest = local
+      .filter(r => nickKey(r.nickname) === key && r.mode === run.mode && !!r.slide_order === run.slide_order)
+      .reduce((m, r) => Math.min(m, r.score_ms), Infinity);
+    local.push(Object.assign({}, run, { score_ms: score, at: new Date().toISOString() }));
+    store.set('runs', local.slice(-300));
+
+    const extras = [];
+    if (S.mistakes) extras.push(`${S.mistakes * MISTAKE_PENALTY_MS / 1000} seconds for ${plural(S.mistakes, 'mistake')}`);
+    if (S.hints) extras.push(`${S.hints * HINT_PENALTY_MS / 1000} seconds for ${plural(S.hints, 'hint')}`);
+    const breakdown = extras.length
+      ? `Your score is ${fmtTime(score)}: ${fmtTime(time)} on the clock, plus ${extras.join(' and ')}.`
+      : `Your score is ${fmtTime(score)}, with no mistakes and no hints.`;
+    const lead = S.mode === 'practice'
+      ? `All ${TOTAL} branches are in place.`
+      : (S.firstScore === TOTAL ? `Every branch was right on the first check.` : `All ${TOTAL} branches are right; ${S.firstScore} were right on the first check.`);
+
+    const show = () => {
+      showResult({
+        title: 'The whole tree is perfused.',
+        text: `${lead} ${breakdown}`,
+        stats: [['Score', fmtTime(score)], ['Time', fmtTime(time)], ['Mistakes', S.mistakes], ['Hints', S.hints]],
+        best: lb.on ? 'Saving your score to the leaderboard…' : localBestLine(prevBest, score),
+        actions: [
+          { label: 'Explore the tree', cls: 'btn', fn: () => toast('Select any box to see what it supplies.', 3000) },
+          { label: 'Leaderboard', cls: 'btn', fn: () => openBoard(run.mode, run.slide_order) },
+          { label: 'Play again', cls: 'btn btn-primary', fn: () => openIntro() }
+        ]
+      });
+      if (lb.on) submitRun(run, score, prevBest);
+    };
     if (reduceMotion.matches) { sound.finish(); show(); return; }
     heartbeat(show);
+  }
+
+  function localBestLine(prevBest, score) {
+    if (!isFinite(prevBest)) return 'Your first finished tree on this board. That’s the score to beat.';
+    if (score < prevBest) return `Your best score yet on this board. Previous best: ${fmtTime(prevBest)}.`;
+    return `Your best on this board is ${fmtTime(prevBest)}.`;
+  }
+
+  async function submitRun(run, score, prevLocalBest) {
+    const line = el.resultBest;
+    if (run.time_ms < MIN_TIME_MS) { line.textContent = localBestLine(prevLocalBest, score); return; }
+    try {
+      const board = await lb.board(run.mode, run.slide_order) || [];
+      await lb.submit(run);
+      const key = nickKey(run.nickname);
+      const mine = board.find(r => r.nickname_key === key);
+      const others = board.filter(r => r.nickname_key !== key);
+      const best = mine ? Math.min(mine.score_ms, score) : score;
+      const rank = 1 + others.filter(r => r.score_ms < best).length;
+      const where = `#${rank} of ${others.length + 1} on the ${boardLabel(run.mode, run.slide_order)} leaderboard`;
+      if (!mine) line.textContent = `Saved. You’re on the board at ${where}.`;
+      else if (score < mine.score_ms) line.textContent = `New personal best. You’re ${where}.`;
+      else line.textContent = `Saved. Your best is still ${fmtTime(mine.score_ms)}, ${where}.`;
+    } catch (e) {
+      if (retryable(e)) {
+        queueRun(run);
+        line.textContent = 'Couldn’t reach the leaderboard. Your score is saved on this device and will be sent the next time you open the game.';
+      } else {
+        line.textContent = `The leaderboard didn’t accept this score (${e.message}).`;
+      }
+    }
   }
 
   // The pulse wave runs from the heart out to every branch, twice (lub-dub)
@@ -1040,19 +1153,32 @@
   // ------------------------------------------------------------------
   // New game / intro
   // ------------------------------------------------------------------
+  const NICK_HINT = 'Use the same nickname every time to keep all your scores together.';
   function openIntro() {
     const prefs = store.get('prefs', { mode: 'practice', strict: false });
     el.introForm.elements.mode.value = prefs.mode;
     el.strictInput.checked = !!prefs.strict;
+    el.nickInput.value = cleanNick(store.get('nickname', ''));
+    el.nickHint.textContent = NICK_HINT;
+    el.nickHint.classList.remove('error');
     el.intro.showModal();
-    document.getElementById('btnStart').focus();
+    (el.nickInput.value ? document.getElementById('btnStart') : el.nickInput).focus();
   }
+  el.nickInput.addEventListener('input', () => { el.nickHint.textContent = NICK_HINT; el.nickHint.classList.remove('error'); });
   el.intro.addEventListener('cancel', e => { if (!S || !S.running) e.preventDefault(); });
   el.introForm.addEventListener('submit', e => {
     e.preventDefault();
+    const nick = cleanNick(el.nickInput.value);
+    if (!nick) {
+      el.nickHint.textContent = 'Enter a nickname to start. It’s how your scores show up on the leaderboard.';
+      el.nickHint.classList.add('error');
+      el.nickInput.focus();
+      return;
+    }
     const mode = el.introForm.elements.mode.value === 'test' ? 'test' : 'practice';
     const strict = el.strictInput.checked;
     store.set('prefs', { mode, strict });
+    store.set('nickname', nick);
     el.intro.close();
     startGame(mode, strict);
   });
@@ -1093,6 +1219,149 @@
   el.btnSound.addEventListener('click', () => { sound.on = !sound.on; store.set('sound', sound.on); renderSound(); if (sound.on) sound.correct(); });
 
   // ------------------------------------------------------------------
+  // Leaderboard dialog
+  // ------------------------------------------------------------------
+  const boardView = { mode: 'practice', slide: false, token: 0 };
+
+  function fmtWhen(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: sameYear ? undefined : 'numeric' }) +
+      ', ' + d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+
+  function localBoard(mode, slide) {
+    const best = new Map();
+    store.get('runs', []).filter(r => r.mode === mode && !!r.slide_order === slide).forEach(r => {
+      const k = nickKey(r.nickname);
+      const cur = best.get(k);
+      if (!cur) best.set(k, Object.assign({}, r, { nickname_key: k, runs: 1, created_at: r.at }));
+      else {
+        cur.runs++;
+        if (r.score_ms < cur.score_ms) Object.assign(cur, r, { nickname_key: k, runs: cur.runs, created_at: r.at });
+      }
+    });
+    return [...best.values()].sort((a, b) => a.score_ms - b.score_ms || String(a.created_at).localeCompare(String(b.created_at)));
+  }
+
+  function openBoard(mode, slide) {
+    boardView.mode = mode || (S ? S.mode : 'practice');
+    boardView.slide = slide != null ? !!slide : !!(S && S.strict);
+    if (!el.boardDialog.open) el.boardDialog.showModal();
+    loadBoard();
+  }
+
+  async function loadBoard() {
+    const token = ++boardView.token;
+    el.boardDialog.querySelectorAll('[data-bmode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.bmode === boardView.mode)));
+    el.boardDialog.querySelectorAll('[data-bslide]').forEach(b => b.setAttribute('aria-pressed', String((b.dataset.bslide === '1') === boardView.slide)));
+    el.boardBody.innerHTML = '<p class="board-msg">Loading scores…</p>';
+    let rows = null, note = '';
+    if (lb.on) {
+      try { rows = await lb.board(boardView.mode, boardView.slide) || []; }
+      catch (e) { note = 'Couldn’t reach the leaderboard right now, so this shows scores from this device only.'; }
+    } else {
+      note = 'The global leaderboard isn’t connected yet, so this shows scores from this device only.';
+    }
+    if (token !== boardView.token) return; // a newer tab was chosen meanwhile
+    const global = !!rows;
+    if (!rows) rows = localBoard(boardView.mode, boardView.slide);
+    el.boardNote.textContent = note;
+    el.boardNote.hidden = !note;
+    renderBoard(rows, global);
+  }
+
+  function cell(tag, text, cls) {
+    const c = document.createElement(tag);
+    if (text != null) c.textContent = text;
+    if (cls) c.className = cls;
+    return c;
+  }
+
+  function renderBoard(rows, global) {
+    el.boardBody.innerHTML = '';
+    if (!rows.length) {
+      el.boardBody.appendChild(cell('p', `No scores on the ${boardLabel(boardView.mode, boardView.slide)} board yet. Finish a game to be the first.`, 'board-msg'));
+      return;
+    }
+    const me = nickKey(store.get('nickname', ''));
+    const table = cell('table', null, 'lb');
+    const head = table.createTHead().insertRow();
+    [['#', 'num'], ['Player', ''], ['Score', 'num'], ['Time', 'num opt'], ['Mistakes', 'num opt'], ['Hints', 'num opt'], ['Runs', 'num']]
+      .forEach(([t, c]) => head.appendChild(cell('th', t, c)));
+    const tbody = table.createTBody();
+    let rank = 0, prev = null;
+    rows.forEach((r, i) => {
+      if (r.score_ms !== prev) { rank = i + 1; prev = r.score_ms; }
+      const tr = tbody.insertRow();
+      if (r.nickname_key === me) tr.className = 'me';
+      tr.appendChild(cell('td', rank, 'num rank'));
+      const who = cell('td', null, 'who');
+      const btn = cell('button', r.nickname, 'player');
+      btn.type = 'button';
+      btn.setAttribute('aria-expanded', 'false');
+      btn.addEventListener('click', () => togglePlayer(tr, r, global, btn));
+      who.appendChild(btn);
+      tr.appendChild(who);
+      tr.appendChild(cell('td', fmtTime(r.score_ms), 'num score'));
+      tr.appendChild(cell('td', fmtTime(r.time_ms), 'num opt'));
+      tr.appendChild(cell('td', r.mistakes, 'num opt'));
+      tr.appendChild(cell('td', r.hints, 'num opt'));
+      tr.appendChild(cell('td', r.runs, 'num'));
+    });
+    el.boardBody.appendChild(table);
+    const mine = el.boardBody.querySelector('tr.me');
+    if (mine) mine.scrollIntoView({ block: 'nearest' });
+  }
+
+  async function togglePlayer(tr, r, global, btn) {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains('runs-row')) {
+      next.remove();
+      btn.setAttribute('aria-expanded', 'false');
+      return;
+    }
+    btn.setAttribute('aria-expanded', 'true');
+    const row = document.createElement('tr');
+    row.className = 'runs-row';
+    const td = cell('td', 'Loading runs…');
+    td.colSpan = 7;
+    row.appendChild(td);
+    tr.after(row);
+    let runs;
+    try {
+      runs = global ? (await lb.runs(r.nickname_key) || [])
+        : store.get('runs', []).filter(x => nickKey(x.nickname) === r.nickname_key).map(x => Object.assign({}, x, { created_at: x.at })).reverse();
+    } catch (e) {
+      td.textContent = 'Couldn’t load this player’s runs. Try again in a moment.';
+      return;
+    }
+    td.textContent = '';
+    td.appendChild(cell('p', `${plural(runs.length, 'run')} by ${r.nickname}${global ? '' : ' on this device'}`, 'runs-title'));
+    const t = cell('table', null, 'runs');
+    const h = t.createTHead().insertRow();
+    [['When', ''], ['Board', ''], ['Score', 'num'], ['Time', 'num'], ['Mistakes', 'num opt'], ['Hints', 'num opt']].forEach(([x, c]) => h.appendChild(cell('th', x, c)));
+    const b = t.createTBody();
+    runs.forEach(x => {
+      const rr = b.insertRow();
+      rr.appendChild(cell('td', fmtWhen(x.created_at)));
+      rr.appendChild(cell('td', boardLabel(x.mode, x.slide_order)));
+      rr.appendChild(cell('td', fmtTime(x.score_ms), 'num score'));
+      rr.appendChild(cell('td', fmtTime(x.time_ms), 'num'));
+      rr.appendChild(cell('td', x.mistakes, 'num opt'));
+      rr.appendChild(cell('td', x.hints, 'num opt'));
+    });
+    td.appendChild(t);
+  }
+
+  el.btnBoard.addEventListener('click', () => openBoard());
+  el.boardClose.addEventListener('click', () => el.boardDialog.close());
+  el.boardDialog.addEventListener('click', e => { if (e.target === el.boardDialog) el.boardDialog.close(); });
+  el.boardDialog.querySelectorAll('[data-bmode]').forEach(b => b.addEventListener('click', () => { boardView.mode = b.dataset.bmode; loadBoard(); }));
+  el.boardDialog.querySelectorAll('[data-bslide]').forEach(b => b.addEventListener('click', () => { boardView.slide = b.dataset.bslide === '1'; loadBoard(); }));
+
+  // ------------------------------------------------------------------
   // Boot
   // ------------------------------------------------------------------
   function boot() {
@@ -1106,6 +1375,7 @@
     fitWidth();
     drawIn();
     openIntro();
+    flushPending();
   }
 
   const fontsReady = document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve();

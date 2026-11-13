@@ -29,15 +29,16 @@
 
     <dl class="stats" aria-label="Game stats">
       <div class="stat"><dt>Time</dt><dd id="statTime">0:00</dd></div>
-      <div class="stat"><dt>Placed</dt><dd id="statPlaced">0 of 63</dd></div>
       <div class="stat"><dt>Mistakes</dt><dd id="statMistakes">0</dd></div>
       <div class="stat"><dt>Hints</dt><dd id="statHints">0</dd></div>
+      <div class="stat stat-score"><dt>Score</dt><dd id="statScore">0:00</dd></div>
     </dl>
 
     <div class="actions">
       <button class="btn" id="btnHint" type="button">Hint</button>
       <button class="btn btn-primary" id="btnCheck" type="button" hidden>Check answers</button>
       <button class="btn btn-quiet" id="btnReveal" type="button">Show answers</button>
+      <button class="btn" id="btnBoard" type="button">Leaderboard</button>
       <button class="btn" id="btnNew" type="button">New game</button>
       <button class="btn btn-icon" id="btnSound" type="button" aria-pressed="true" aria-label="Sound">
         <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-on"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.8 7.8 0 0 1 0 11" class="wave"/></svg>
@@ -93,6 +94,12 @@
     <h2 id="introTitle">Build the arterial tree</h2>
     <p class="lede">Start at the arch of the aorta and work out to the smallest branches. Drag each term from the word bank onto its box in the tree, or tap a term and then tap a box. When a branch is right, blood flows into it.</p>
 
+    <label class="field" for="nickInput">
+      <span class="field-label">Your nickname</span>
+      <input id="nickInput" name="nickname" type="text" maxlength="24" autocomplete="nickname" autocapitalize="words" spellcheck="false" placeholder="Pick a name for the leaderboard">
+      <span class="field-hint" id="nickHint">Use the same nickname every time to keep all your scores together.</span>
+    </label>
+
     <fieldset class="modes">
       <legend>How do you want to play?</legend>
       <label class="mode-card">
@@ -112,6 +119,8 @@
       <span>Branches must be in the same order as the slides</span>
     </label>
 
+    <p class="rule">Your score is your time plus 10 seconds for each mistake and 20 seconds for each hint. Lower is better.</p>
+
     <div class="dialog-actions">
       <button class="btn btn-primary btn-lg" value="start" id="btnStart">Start</button>
     </div>
@@ -126,6 +135,26 @@
   <div class="dialog-actions" id="resultActions"></div>
 </dialog>
 
+<dialog class="sheet sheet-wide" id="boardDialog" aria-labelledby="boardTitle">
+  <div class="board-top">
+    <h2 id="boardTitle">Leaderboard</h2>
+    <button class="dialog-close" type="button" id="boardClose" aria-label="Close leaderboard">&times;</button>
+  </div>
+  <div class="board-tabs">
+    <div class="seg" role="group" aria-label="Mode">
+      <button type="button" data-bmode="practice" aria-pressed="true">Practice</button>
+      <button type="button" data-bmode="test" aria-pressed="false">Test</button>
+    </div>
+    <div class="seg" role="group" aria-label="Branch order">
+      <button type="button" data-bslide="0" aria-pressed="true">Any order</button>
+      <button type="button" data-bslide="1" aria-pressed="false">Slide order</button>
+    </div>
+  </div>
+  <p class="board-note" id="boardNote" hidden></p>
+  <div class="board-body" id="boardBody"></div>
+  <p class="board-foot">Score is time plus 10 seconds per mistake and 20 seconds per hint. Lower is better. Each player's best run is shown; select a name to see all of their runs.</p>
+</dialog>
+
 <dialog class="sheet sheet-small" id="confirmDialog" aria-labelledby="confirmTitle">
   <h2 id="confirmTitle"></h2>
   <p class="lede" id="confirmText"></p>
@@ -135,6 +164,7 @@
   </div>
 </dialog>
 
+<script src="config.js"></script>
 <script src="data.js"></script>
 <script src="app.js"></script>
 </body>
