@@ -36,9 +36,9 @@ branch and the tree lays itself out again. No build step.
 
 ## Publishing (one-time setup)
 
-Settings → Pages → Build and deployment → Source: **Deploy from a branch**, then
-Branch: **main** and folder **/ (root)** → Save. GitHub publishes the site within a
-minute or two, and again after every push to `main`.
+Settings → Pages → Build and deployment → Source: **GitHub Actions**. The workflow in
+`.github/workflows/pages.yml` publishes the site on every push to `main` (watch it in the
+Actions tab, or run it by hand there with "Run workflow").
 
 To run it locally: `python3 -m http.server` in this folder, then open
 http://localhost:8000.
